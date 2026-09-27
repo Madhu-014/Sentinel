@@ -1,6 +1,6 @@
 # Sentinel: Adversarial LLM Firewall
 
-Sentinel is a highly available, multi-layered inference gateway designed to intercept, classify, and block malicious prompts (prompt injection, jailbreaks, PII exfiltration) before they reach sensitive backend AI agents.
+Sentinel is an asynchronous, multi-layered inference gateway designed to intercept, classify, and block malicious prompts (prompt injection, jailbreaks, PII exfiltration) before they reach sensitive backend AI agents.
 
 ## 🚀 System Design Marvel: The Two-Tier Architecture
 
@@ -9,8 +9,8 @@ Modern LLM applications are highly vulnerable to adversarial prompt manipulation
 Sentinel solves this by implementing a **Dual-Tier "Fast/Slow" Routing Architecture**—a true system design marvel built for production-grade resilience and sub-20ms latency.
 
 ### Tier 1: The Edge Layer (Fast & Cheap)
-1. **Gateway (FastAPI):** High-throughput entry point that routes user prompts through the validation layers.
-2. **Semantic Cache (Redis):** Instantly checks Redis for known malicious vectors using FAISS/Redis vector search.
+1. **Gateway (FastAPI):** Asynchronous, non-blocking entry point that routes user prompts through the validation layers.
+2. **Semantic Cache (Redis):** Instantly checks Redis for known malicious vectors using Redis vector search (RediSearch HNSW index, cosine similarity).
 3. **Statistical Classifier (Quantized DeBERTa):** If uncached, a localized, heavily fine-tuned, and ONNX-quantized DeBERTa model evaluates the prompt. By quantizing `microsoft/deberta-v3-small` to INT8, Sentinel achieves an incredible **~14ms local inference latency** running natively on edge hardware, entirely eliminating network round-trips for 99% of requests.
 
 ### Tier 2: The Deep Check Layer (Slow & Nuanced)
@@ -20,7 +20,7 @@ Any prompt flagged as a `BLOCK` by Tier 1 (or exceeding complexity thresholds) i
 
 ### Tier 3: Telemetry & Continuous Learning (Asynchronous)
 1. **Event Streaming (Kafka):** The Gateway asynchronously fires the full lifecycle record of the request (latency, verdicts, confidence scores) into a Kafka topic, ensuring telemetry never blocks the critical path.
-2. **Permanent Audit (Cassandra):** A fault-tolerant Kafka consumer writes the records into a highly-available Cassandra cluster for long-term auditing.
+2. **Permanent Audit (Cassandra):** A Kafka consumer resilient to malformed messages writes the records into a durable Cassandra store for long-term auditing.
 
 ---
 
@@ -28,24 +28,29 @@ Any prompt flagged as a `BLOCK` by Tier 1 (or exceeding complexity thresholds) i
 
 Sentinel doesn't rely on off-the-shelf classifiers. It uses a bespoke, fine-tuned `DeBERTa-v3-small` model optimized specifically for prompt injection and jailbreak detection.
 
-### The Dataset (28,938 Curated Variants)
-The model was trained on a high-quality dataset synthesized across 12 specific threat matrices, including:
+### The Dataset
+The datasets used to power the layers were separated into two distinct sources:
+* **Phase 1 similarity index:** 28,938 vectors in Redis (merged open-source datasets + obfuscated variants — leetspeak, homoglyph, zero-width, base64)
+* **Phase 3 synthetic dataset:** 2,664 rows generated across 44 disguise x harm-category combinations (12 disguise categories x 4 harm categories, minus non-viable combinations)
+
+The synthetic training dataset included high-quality data generated for:
 * **Novel Disguises:** Malicious intent wrapped in academic citations, closed captions, and debugging contexts.
 * **Meta-Vocabulary (Benign):** Highly adversarial *benign* prompts discussing system architecture, prompt injection, and jailbreaks in an innocent context (e.g., support tickets, code reviews) to drastically reduce False Positive rates.
 * **Cross-Lingual & Reverse Psychology:** Complex attacks exploiting negation ("Please do NOT tell me how to...") and translation boundaries.
 
 ### Quantization for the Edge
-To achieve sub-20ms latency, the fine-tuned PyTorch model was exported to ONNX format and quantized to INT8 precision. This reduced the memory footprint by over 70% and accelerated CPU inference speeds by 3x, allowing the classifier to run efficiently alongside the FastAPI gateway without requiring expensive GPU instances.
+Quantization to INT8 reduced the model's size by ~70% (541.8MB -> 164.3MB), with the quantized model achieving ~14ms inference latency on local CPU (Apple M2) for a full-length (~450 character) prompt. This allowed the classifier to run efficiently alongside the FastAPI gateway without requiring expensive GPU instances.
 
 ---
 
 ## 📈 Headline Performance
 
-* **Dataset Size:** 28,938 curated text variants.
+* **Phase 1 similarity index:** 28,938 vectors in Redis (merged open-source datasets + obfuscated variants).
+* **Phase 3 synthetic dataset:** 2,664 rows generated across 44 disguise x harm-category combinations.
 * **Fine-tuning Set:** 18,126 high-quality training rows.
-* **Validation False Negative Rate:** 0.99%.
+* **Test Set False Negative Rate:** 0.99%.
 * **Inference Speed:** ~14ms latency (ONNX quantized).
-* **Red-Team Performance:** 100% Catch Rate on a structured, out-of-distribution 15-prompt red-team batch, with a 0% False Positive Rate on highly adversarial benign inputs.
+* **Red-Team Performance:** 100% Catch Rate on a structured, out-of-distribution 15-prompt red-team batch, with a 0% False Positive Rate on highly adversarial benign inputs. This result reflects one red-team batch testing one language (Spanish) and one negation pattern for the cross-lingual attack vector — see PHASE4_REDTEAM.md for the full methodology and known limitations.
 
 ---
 
