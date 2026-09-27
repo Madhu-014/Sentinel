@@ -1,0 +1,23 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+# Ensure ONNX Runtime and Transformers are installed (they should be in requirements.txt)
+
+# Bake the tokenizer into the image by downloading it during build
+RUN python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('microsoft/deberta-v3-small')"
+
+# Copy the quantized model
+COPY models/ /app/models/
+
+# Copy the source code
+COPY src/ /app/src/
+
+# Expose port 8000
+EXPOSE 8000
+
+# Start FastAPI
+CMD ["uvicorn", "src.gateway:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,150 @@
+version: '3.8'
+
+networks:
+  sentinel_net:
+    driver: bridge
+
+volumes:
+  kafka_data:
+  cassandra_data:
+
+services:
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - sentinel_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: sentinel-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - sentinel_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: sentinel-kafka
+    ports:
+      - "9092:9092"
+    networks:
+      - sentinel_net
+    environment:
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cassandra:
+    image: cassandra:latest
+    container_name: sentinel-cassandra
+    ports:
+      - "9042:9042"
+    networks:
+      - sentinel_net
+    environment:
+      - CASSANDRA_CLUSTER_NAME=SentinelCluster
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES;'"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+
+  cassandra-init:
+    image: cassandra:latest
+    container_name: sentinel-cassandra-init
+    networks:
+      - sentinel_net
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./setup_cassandra.cql:/setup_cassandra.cql
+    command: >
+      bash -c "echo 'Initializing Cassandra schema...'; 
+      cqlsh cassandra -f /setup_cassandra.cql; 
+      cqlsh cassandra -e 'ALTER TABLE sentinel.request_logs ADD disagreement_flag boolean;' || true;
+      echo 'Schema applied.'"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: sentinel-gateway
+    ports:
+      - "8000:8000"
+    networks:
+      - sentinel_net
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: sentinel-worker
+    networks:
+      - sentinel_net
+    env_file:
+      - .env
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: sentinel-consumer
+    networks:
+      - sentinel_net
+    environment:
+      - CASSANDRA_HOST=cassandra
+      - CASSANDRA_PORT=9042
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+
